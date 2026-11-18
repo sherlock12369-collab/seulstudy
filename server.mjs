@@ -44,6 +44,12 @@ const reloadConfig = () => {
 await mkdir(join(DATA, 'lessons'), { recursive: true });
 const DB_FILE = join(DATA, 'db.json');
 const db = existsSync(DB_FILE) ? JSON.parse(readFileSync(DB_FILE, 'utf8')) : { users: {}, sessions: {} };
+db.duels = db.duels || {};
+const DUEL_KEEP_MS = 14 * 86400000;
+function cleanDuels() {
+  for (const [id, d] of Object.entries(db.duels)) if (Date.now() - d.created > DUEL_KEEP_MS) delete db.duels[id];
+}
+cleanDuels();
 let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
@@ -117,6 +123,33 @@ const unitDone = (done, unit) => Array.from({ length: LESSONS_PER_UNIT }, (_, l)
 /** from 단원부터 to 단원 앞까지의 레슨을 끝낸 것으로 표시 (이미 한 횟수는 그대로) */
 function markUnits(prog, from, to) {
   for (let un = from; un < to; un++) for (let l = 0; l < LESSONS_PER_UNIT; l++) prog.done[`${un}-${l}`] ||= 1;
+}
+
+// ───────── 대결 도우미 ─────────
+const BOT = { id: 'seul', nick: '슬' };
+const isIn = (d, u) => d.from.id === u.id || d.to.id === u.id;
+/** exercises는 빼고, 내가 아직 안 했으면 myTurn */
+function duelView(d, u) {
+  const { exercises, ...rest } = d;
+  return { ...rest, total: exercises.length, myTurn: !d.results[u.id] };
+}
+/** 내가 끝낸 단원(없으면 단원 0)에서 레슨 2개를 뽑아 섞은 8문제 (짝 맞추기 빼고) */
+function duelExercises(u, courseId) {
+  const course = courseOf(courseId);
+  const done = (u.progress[courseId] || {}).done || {};
+  const usable = course.units.map((_, ui) => ui).filter((ui) => builtinLesson(courseId, ui, 0));
+  let pool = usable.filter((ui) => unitDone(done, ui));
+  if (!pool.length) pool = usable.includes(0) ? [0] : usable.slice(0, 1);
+  const picks = [];
+  for (let k = 0; k < 2; k++) {
+    const ui = pool[Math.floor(Math.random() * pool.length)];
+    const l = builtinLesson(courseId, ui, Math.floor(Math.random() * LESSONS_PER_UNIT), Math.floor(Math.random() * 1e6));
+    if (l) picks.push(...l.exercises.filter((e) => e.type !== 'match'));
+  }
+  const seen = new Set();
+  const uniq = picks.filter((e) => { const k = JSON.stringify(e); if (seen.has(k)) return false; seen.add(k); return true; });
+  for (let i = uniq.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [uniq[i], uniq[j]] = [uniq[j], uniq[i]]; }
+  return uniq.slice(0, 8);
 }
 
 // ───────── 비밀번호 ─────────
@@ -455,6 +488,68 @@ const routes = {
     u.gems = (u.gems || 0) + gems;
     save();
     return { gems, user: publicUser(u) };
+  },
+  // ───── 대결 ─────
+  async 'GET /api/users'(req, u) {
+    const list = Object.values(db.users).filter((x) => !x.guest && x.id !== u.id).map(publicUser)
+      .map((p) => ({ id: p.id, nick: p.nick, weekXp: p.weekXp }))
+      .sort((a, b) => b.weekXp - a.weekXp || a.nick.localeCompare(b.nick)).slice(0, 50);
+    return { list };
+  },
+  async 'POST /api/duel'(req, u) {
+    const { opponent } = await body(req);
+    let to = BOT;
+    if (opponent && opponent !== BOT.id) {
+      const o = db.users[String(opponent).toLowerCase()];
+      if (!o) throw fail(400, '없는 아이디예요.');
+      if (o.id === u.id) throw fail(400, '나 자신과는 대결할 수 없어요.');
+      if (o.guest) throw fail(400, '체험 계정에는 도전할 수 없어요.');
+      to = { id: o.id, nick: o.nick };
+    }
+    const courseId = courseOf(u.course) ? u.course : 'en';
+    const exercises = duelExercises(u, courseId);
+    if (exercises.length < 4) throw fail(400, '대결 문제를 만들지 못했어요.');
+    cleanDuels();
+    const duel = { id: randomBytes(6).toString('hex'), course: courseId, from: { id: u.id, nick: u.nick }, to, exercises, created: Date.now(), results: {}, status: 'waiting', winner: null };
+    db.duels[duel.id] = duel;
+    save();
+    return { duel };
+  },
+  async 'POST /api/duel/finish'(req, u) {
+    const { id, correct, ms } = await body(req);
+    const d = db.duels[id];
+    if (!d || !isIn(d, u)) throw fail(404, '없는 대결이에요.');
+    if (d.results[u.id]) throw fail(400, '이미 끝낸 대결이에요.');
+    const total = d.exercises.length;
+    d.results[u.id] = { correct: Math.max(0, Math.min(total, Math.round(Number(correct) || 0))), ms: Math.max(0, Math.round(Number(ms) || 0)) };
+    if (d.to.id === BOT.id && !d.results[BOT.id]) {
+      d.results[BOT.id] = { correct: Math.min(total, 5 + Math.floor(Math.random() * 4)), ms: 25000 + Math.floor(Math.random() * 35001) };
+    }
+    const a = d.results[d.from.id];
+    const b = d.results[d.to.id];
+    if (a && b && d.status !== 'done') {
+      d.status = 'done';
+      const fromWins = a.correct !== b.correct ? a.correct > b.correct : a.ms <= b.ms;
+      d.winner = fromWins ? d.from.id : d.to.id;
+      const loser = fromWins ? d.to.id : d.from.id;
+      const w = db.users[d.winner];
+      if (w) { w.gems = (w.gems || 0) + 10; addXp(w, 10); }
+      const l = db.users[loser];
+      if (l) addXp(l, 3);
+    }
+    save();
+    return { duel: duelView(d, u), won: d.status === 'done' ? d.winner === u.id : null, user: publicUser(u) };
+  },
+  async 'GET /api/duels'(req, u) {
+    const list = Object.values(db.duels).filter((d) => isIn(d, u)).sort((a, b) => b.created - a.created).slice(0, 20).map((d) => duelView(d, u));
+    return { list };
+  },
+  async 'GET /api/duel'(req, u, url) {
+    const d = db.duels[url.searchParams.get('id')];
+    if (!d || !isIn(d, u)) throw fail(404, '없는 대결이에요.');
+    const v = duelView(d, u);
+    if (v.myTurn) v.exercises = d.exercises;
+    return { duel: v };
   },
   async 'GET /api/leaderboard'() {
     const list = Object.values(db.users).map(publicUser).map((p) => ({ id: p.id, nick: p.nick, weekXp: p.weekXp, streak: p.streak.count }))

@@ -192,6 +192,79 @@ try {
   ok('보석이 모자라면 에너지 상점 거절');
   token = mina;
 
+  // ───── 대결 ─────
+  const minaTok = token;
+  token = null;
+  r = await api('/api/signup', { method: 'POST', body: { code: CODE, id: 'jun', pass: '1234', nick: '준' } });
+  const junTok = r.data.token;
+  const guestRes = await api('/api/guest', { method: 'POST', auth: false });
+  const guestTok = guestRes.data.token;
+  const guestId = guestRes.data.user.id;
+  token = minaTok;
+
+  r = await api('/api/users');
+  assert.equal(r.status, 200);
+  assert.ok(r.data.list.some((x) => x.id === 'jun') && !r.data.list.some((x) => x.id === 'mina' || x.id.startsWith('guest_')));
+  ok('대결 상대 목록: 나와 체험 계정은 빼고');
+
+  for (const opponent of ['mina', 'nobody', guestId]) {
+    r = await api('/api/duel', { method: 'POST', body: { opponent } });
+    assert.equal(r.status, 400, opponent);
+  }
+  ok('나 자신·없는 아이디·체험 계정에는 도전 안 됨');
+
+  const meBefore = (await api('/api/me')).data.user;
+  r = await api('/api/duel', { method: 'POST', body: {} });
+  assert.equal(r.status, 200);
+  let duel = r.data.duel;
+  assert.deepEqual(duel.to, { id: 'seul', nick: '슬' }); assert.equal(duel.from.id, 'mina'); assert.equal(duel.status, 'waiting');
+  assert.equal(duel.exercises.length, 8); assert.ok(duel.exercises.every((e) => e.type !== 'match'));
+  r = await api('/api/duel/finish', { method: 'POST', body: { id: duel.id, correct: 8, ms: 1000 } });
+  assert.equal(r.status, 200); assert.equal(r.data.duel.status, 'done'); assert.equal(r.data.won, true); assert.equal(r.data.duel.winner, 'mina');
+  assert.equal(r.data.duel.exercises, undefined); assert.ok(r.data.duel.results.seul.correct >= 5 && r.data.duel.results.seul.ms >= 25000);
+  assert.equal(r.data.user.gems, meBefore.gems + 10); assert.equal(r.data.user.xp, meBefore.xp + 10);
+  r = await api('/api/duel/finish', { method: 'POST', body: { id: duel.id, correct: 8, ms: 1000 } });
+  assert.equal(r.status, 400);
+  ok('슬 봇 대결: 8문제(짝 맞추기 없음), 끝내면 봇 결과 바로, 이기면 보석 10·XP 10, 한 번만');
+
+  r = await api('/api/duel', { method: 'POST', body: { opponent: 'jun' } });
+  duel = r.data.duel;
+  assert.equal(duel.to.id, 'jun');
+  const minaXp = (await api('/api/me')).data.user.xp;
+  r = await api('/api/duel/finish', { method: 'POST', body: { id: duel.id, correct: 3, ms: 5000 } });
+  assert.equal(r.data.won, null); assert.equal(r.data.duel.status, 'waiting');
+  r = await api('/api/duel?id=' + duel.id);
+  assert.equal(r.data.duel.myTurn, false); assert.equal(r.data.duel.exercises, undefined);
+
+  token = junTok;
+  r = await api('/api/duels');
+  const item = r.data.list.find((d) => d.id === duel.id);
+  assert.ok(item && item.myTurn === true && item.exercises === undefined);
+  r = await api('/api/duel?id=' + duel.id);
+  assert.equal(r.data.duel.exercises.length, 8);
+  r = await api('/api/duel/finish', { method: 'POST', body: { id: duel.id, correct: 5, ms: 90000 } });
+  assert.equal(r.data.won, true); assert.equal(r.data.duel.winner, 'jun'); assert.equal(r.data.user.gems, 10); assert.equal(r.data.user.xp, 10);
+
+  token = guestTok;
+  assert.equal((await api('/api/duel?id=' + duel.id)).status, 404);
+  assert.equal((await api('/api/duel/finish', { method: 'POST', body: { id: duel.id, correct: 8, ms: 1 } })).status, 404);
+
+  token = minaTok;
+  r = await api('/api/duels');
+  const mine = r.data.list.find((d) => d.id === duel.id);
+  assert.equal(mine.status, 'done'); assert.equal(mine.myTurn, false); assert.equal(mine.winner, 'jun');
+  assert.equal((await api('/api/me')).data.user.xp, minaXp + 3);
+  ok('친구 대결: 둘 다 끝내면 결과, 맞힌 수 많은 쪽 승리, 진 쪽 XP 3, 참가자만 볼 수 있음');
+
+  r = await api('/api/duel', { method: 'POST', body: { opponent: 'jun' } });
+  const tie = r.data.duel.id;
+  await api('/api/duel/finish', { method: 'POST', body: { id: tie, correct: 4, ms: 3000 } });
+  token = junTok;
+  r = await api('/api/duel/finish', { method: 'POST', body: { id: tie, correct: 4, ms: 2000 } });
+  assert.equal(r.data.duel.winner, 'jun');
+  token = minaTok;
+  ok('맞힌 수가 같으면 더 빨리 끝낸 쪽 승리');
+
   const home = await raw('/');
   assert.equal(home.status, 200); assert.match(home.text, /<title>슬터디<\/title>/);
   for (const p of ['/../config.json', '/%2e%2e/config.json', '/..%2fconfig.json', '/%2e%2e%5cconfig.json']) {
