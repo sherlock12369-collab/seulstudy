@@ -127,8 +127,14 @@ try {
   ok('상자: 레슨 0·1 끝내야 열림, 보석 10~30, 한 번만');
 
   // ───── 에너지 상점 (보석 40) ─────
-  r = await api('/api/shop/energy', { method: 'POST' });
-  if ((await api('/api/me')).data.user.gems < 40) assert.match(r.data.error, /보석이 모자라요/);
+  // 상자 보석이 무작위라 보석 수가 그때그때 달라서, 상황을 먼저 맞춘 뒤 확인한다.
+  // 1) 에너지를 하나 써서 가득이 아니게
+  await api('/api/energy', { method: 'POST' });
+  // 2) 보석이 40개 미만이면 거절되는지
+  if ((await api('/api/me')).data.user.gems < 40) {
+    r = await api('/api/shop/energy', { method: 'POST' });
+    assert.equal(r.status, 400); assert.match(r.data.error, /보석이 모자라요/);
+  }
   for (let i = 0; (await api('/api/me')).data.user.gems < 40; i++) {
     await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 0, mistakes: 0 } });
     if (i > 20) throw new Error('보석이 안 모임');
