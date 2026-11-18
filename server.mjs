@@ -578,6 +578,8 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Max-Age', '600');
+    // 크롬·엣지: 공개 사이트(github.io)가 이 컴퓨터(localhost)를 부를 때 필요한 허락
+    if (req.headers['access-control-request-private-network']) res.setHeader('Access-Control-Allow-Private-Network', 'true');
   }
   if (req.method === 'OPTIONS') { res.writeHead(origin ? 204 : 403); res.end(); return; }
   try {
