@@ -56,7 +56,7 @@ try {
   ok('틀린 가입 코드는 거절');
 
   r = await api('/api/signup', { method: 'POST', body: { code: CODE.toLowerCase(), id: 'Mina', pass: '1234', nick: '미나' } });
-  assert.equal(r.status, 200); assert.ok(r.data.token); assert.equal(r.data.user.id, 'mina'); assert.equal(r.data.user.hearts.n, 5);
+  assert.equal(r.status, 200); assert.ok(r.data.token); assert.equal(r.data.user.id, 'mina'); assert.equal(r.data.user.energy.n, 25); assert.equal(r.data.user.energy.max, 25); assert.equal(r.data.user.gems, 0); assert.deepEqual(r.data.user.chests, {}); assert.equal(r.data.user.hearts, undefined);
   ok('가입 성공 (코드는 대소문자 무관, 아이디는 소문자로)');
 
   r = await api('/api/signup', { method: 'POST', body: { code: CODE, id: 'mina', pass: '9999' } });
@@ -89,20 +89,20 @@ try {
   assert.equal(r.status, 400);
   ok('없는 코스는 400');
 
-  r = await api('/api/heart', { method: 'POST' });
-  assert.equal(r.data.hearts.n, 4); assert.ok(r.data.hearts.next > Date.now());
-  ok('하트 하나 잃기 (5 → 4, 다시 차는 시각 있음)');
+  r = await api('/api/energy', { method: 'POST' });
+  assert.equal(r.data.energy.n, 24); assert.ok(r.data.energy.next > Date.now());
+  ok('에너지 1 쓰기 (25 → 24, 다시 차는 시각 있음)');
 
   r = await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 0, mistakes: 0 } });
-  assert.equal(r.data.xp, 15); assert.equal(r.data.first, true); assert.equal(r.data.streakUp, true);
+  assert.equal(r.data.xp, 15); assert.equal(r.data.gems, 8); assert.equal(r.data.user.gems, 8); assert.equal(r.data.first, true); assert.equal(r.data.streakUp, true);
   assert.equal(r.data.user.streak.count, 1); assert.equal(r.data.user.todayXp, 15);
-  ok('첫 완료: 15 XP, 연속 1일');
+  ok('첫 완료: 15 XP, 보석 5+3, 연속 1일');
 
   r = await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 0, mistakes: 0 } });
-  assert.equal(r.data.xp, 10); assert.equal(r.data.streakUp, false);
+  assert.equal(r.data.xp, 10); assert.equal(r.data.gems, 5); assert.equal(r.data.streakUp, false);
   r = await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 0, mistakes: 2 } });
-  assert.equal(r.data.xp, 5); assert.equal(r.data.user.xp, 30); assert.equal(r.data.user.streak.count, 1);
-  ok('다시 하기: 실수 없으면 10, 있으면 5 XP, 연속은 그대로');
+  assert.equal(r.data.xp, 5); assert.equal(r.data.gems, 2); assert.equal(r.data.user.gems, 15); assert.equal(r.data.user.xp, 30); assert.equal(r.data.user.streak.count, 1);
+  ok('다시 하기: 실수 없으면 10 XP·보석 5, 있으면 5 XP·보석 2, 연속은 그대로');
 
   r = await api('/api/lesson?course=en&unit=0&lesson=0');
   assert.equal(r.status, 200);
@@ -111,6 +111,86 @@ try {
   r = await api('/api/leaderboard');
   assert.equal(r.status, 200); assert.equal(r.data.list[0].id, 'mina'); assert.equal(r.data.list[0].weekXp, 30);
   ok('이번 주 순위에 나옴');
+
+  // ───── 상자 ─────
+  r = await api('/api/chest', { method: 'POST', body: { course: 'en', unit: 0 } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /앞 레슨을 먼저/);
+  await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 1, mistakes: 1 } });
+  const gemsBefore = (await api('/api/me')).data.user.gems;
+  r = await api('/api/chest', { method: 'POST', body: { course: 'en', unit: 0 } });
+  assert.equal(r.status, 200); assert.ok(r.data.gems >= 10 && r.data.gems <= 30);
+  assert.equal(r.data.user.gems, gemsBefore + r.data.gems); assert.deepEqual(r.data.user.chests, { en: [0] });
+  r = await api('/api/chest', { method: 'POST', body: { course: 'en', unit: 0 } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /이미 연 상자/);
+  r = await api('/api/chest', { method: 'POST', body: { course: 'en', unit: 99 } });
+  assert.equal(r.status, 400);
+  ok('상자: 레슨 0·1 끝내야 열림, 보석 10~30, 한 번만');
+
+  // ───── 에너지 상점 (보석 40) ─────
+  r = await api('/api/shop/energy', { method: 'POST' });
+  if ((await api('/api/me')).data.user.gems < 40) assert.match(r.data.error, /보석이 모자라요/);
+  for (let i = 0; (await api('/api/me')).data.user.gems < 40; i++) {
+    await api('/api/complete', { method: 'POST', body: { course: 'en', unit: 0, lesson: 0, mistakes: 0 } });
+    if (i > 20) throw new Error('보석이 안 모임');
+  }
+  const g = (await api('/api/me')).data.user.gems;
+  r = await api('/api/shop/energy', { method: 'POST' });
+  assert.equal(r.status, 200); assert.equal(r.data.user.energy.n, 25); assert.equal(r.data.user.gems, g - 40);
+  r = await api('/api/shop/energy', { method: 'POST' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /이미 가득/);
+  ok('에너지 상점: 보석 40개로 가득, 가득이면 거절');
+
+  r = await api('/api/placement', { method: 'POST', body: { course: 'en', unit: 1 } });
+  assert.equal(r.status, 400); assert.match(r.data.error, /이미 시작한 코스/);
+  ok('이미 시작한 코스는 단계 고르기 안 됨');
+
+  // ───── 새 계정으로: 단계 고르기, 에너지 바닥, 건너뛰기, 연습 ─────
+  const mina = token;
+  token = (await api('/api/guest', { method: 'POST', auth: false })).data.token;
+
+  r = await api('/api/placement', { method: 'POST', body: { course: 'ja', unit: 2 } });
+  assert.equal(r.status, 200); assert.equal(r.data.user.course, 'ja');
+  const jaDone = Object.keys(r.data.user.progress.ja.done).sort();
+  assert.equal(jaDone.length, 8); assert.ok(jaDone.includes('1-3') && !jaDone.includes('2-0'));
+  assert.equal(r.data.user.xp, 0);
+  r = await api('/api/placement', { method: 'POST', body: { course: 'ja', unit: 1 } });
+  assert.equal(r.status, 400);
+  r = await api('/api/placement', { method: 'POST', body: { course: 'zh', unit: 99 } });
+  assert.equal(r.status, 400);
+  ok('단계 고르기: 앞 단원 레슨을 XP 없이 끝낸 것으로, 한 번만');
+
+  for (let i = 0; i < 25; i++) await api('/api/energy', { method: 'POST' });
+  r = await api('/api/energy', { method: 'POST' });
+  assert.equal(r.data.energy.n, 0);
+  r = await api('/api/lesson?course=chess&unit=0&lesson=0');
+  assert.equal(r.status, 403); assert.match(r.data.error, /에너지가 없어요/);
+  ok('에너지 0이면 더 안 줄고, 보통 레슨은 403');
+
+  r = await api('/api/lesson?course=chess&unit=1&mode=jump');
+  assert.equal(r.status, 200); assert.equal(r.data.unit, 1); assert.equal(r.data.lesson, 3); assert.ok(r.data.exercises.length >= 6);
+  r = await api('/api/jump', { method: 'POST', body: { course: 'chess', unit: 1, mistakes: 3 } });
+  assert.equal(r.data.passed, false); assert.equal(r.data.xp, 0);
+  assert.equal(Object.keys((r.data.user.progress.chess || { done: {} }).done).length, 0);
+  r = await api('/api/jump', { method: 'POST', body: { course: 'chess', unit: 1, mistakes: 2 } });
+  assert.equal(r.data.passed, true); assert.equal(r.data.xp, 10); assert.equal(r.data.gems, 5); assert.equal(r.data.user.gems, 5);
+  assert.equal(Object.keys(r.data.user.progress.chess.done).length, 8); assert.equal(r.data.user.todayXp, 10); assert.equal(r.data.user.streak.count, 1);
+  r = await api('/api/lesson?course=chess&unit=1&mode=jump');
+  assert.equal(r.status, 400); assert.match(r.data.error, /이미 끝낸 단원/);
+  ok('건너뛰기: 에너지 없이 시험, 실수 2개까지 통과 → 단원까지 끝, +10 XP, 보석 5');
+
+  r = await api('/api/lesson?course=es&mode=practice');
+  assert.equal(r.status, 400); assert.match(r.data.error, /먼저 레슨을 하나/);
+  r = await api('/api/lesson?course=chess&mode=practice');
+  assert.equal(r.status, 200); assert.ok(r.data.exercises.length >= 6);
+  assert.ok(r.data.unit <= 1 && r.data.lesson >= 0 && r.data.lesson < 4);
+  r = await api('/api/practice', { method: 'POST', body: { course: 'chess', mistakes: 0 } });
+  assert.equal(r.data.xp, 5); assert.equal(r.data.energy, 5); assert.equal(r.data.user.energy.n, 5); assert.equal(r.data.user.todayXp, 15);
+  ok('연습: 끝낸 레슨에서 골라 줌(에너지 필요 없음), 끝내면 +5 XP, 에너지 +5');
+
+  r = await api('/api/shop/energy', { method: 'POST' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /보석이 모자라요/);
+  ok('보석이 모자라면 에너지 상점 거절');
+  token = mina;
 
   const home = await raw('/');
   assert.equal(home.status, 200); assert.match(home.text, /<title>슬터디<\/title>/);

@@ -64,17 +64,19 @@ function weekStart(t = Date.now()) {
   return new Date(Date.parse(d) - wd * 86400000).toISOString().slice(0, 10);
 }
 
-// ───────── 하트 ─────────
-const MAX_HEARTS = 5;
-const HEART_MS = 30 * 60 * 1000;
-function hearts(u) {
-  const h = u.hearts || { n: MAX_HEARTS, t: Date.now() };
-  if (h.n < MAX_HEARTS) {
-    const gained = Math.floor((Date.now() - h.t) / HEART_MS);
-    if (gained > 0) { h.n = Math.min(MAX_HEARTS, h.n + gained); h.t += gained * HEART_MS; }
-  } else h.t = Date.now();
-  u.hearts = h;
-  return { n: h.n, max: MAX_HEARTS, next: h.n < MAX_HEARTS ? h.t + HEART_MS : null };
+// ───────── 에너지 ─────────
+// 문제 하나에 1씩 쓰고, 6분마다 1씩 찬다 (최대 25)
+const MAX_ENERGY = 25;
+const ENERGY_MS = 6 * 60 * 1000;
+function energy(u) {
+  // 예전 데이터(하트만 있음)면 가득 찬 에너지로 새로 만든다
+  if (!u.energy) { u.energy = { n: MAX_ENERGY, t: Date.now() }; delete u.hearts; }
+  const e = u.energy;
+  if (e.n < MAX_ENERGY) {
+    const gained = Math.floor((Date.now() - e.t) / ENERGY_MS);
+    if (gained > 0) { e.n = Math.min(MAX_ENERGY, e.n + gained); e.t += gained * ENERGY_MS; }
+  } else e.t = Date.now();
+  return { n: e.n, max: MAX_ENERGY, next: e.n < MAX_ENERGY ? e.t + ENERGY_MS : null };
 }
 
 function streakOf(u) {
@@ -89,9 +91,32 @@ function publicUser(u) {
   const weekXp = Object.entries(u.xpByDay || {}).filter(([d]) => d >= week).reduce((a, [, x]) => a + x, 0);
   return {
     id: u.id, nick: u.nick, xp: u.xp || 0, weekXp, todayXp: (u.xpByDay || {})[dayOf()] || 0,
-    dailyGoal: u.dailyGoal || 20, streak: streakOf(u), hearts: hearts(u),
-    progress: u.progress || {}, course: u.course || null, created: u.created, guest: !!u.guest
+    dailyGoal: u.dailyGoal || 20, streak: streakOf(u), energy: energy(u),
+    progress: u.progress || {}, course: u.course || null, created: u.created, guest: !!u.guest, gems: u.gems || 0, chests: u.chests || {}
   };
+}
+
+// ───────── XP · 연속 학습일 (레슨·건너뛰기·연습이 함께 쓴다) ─────────
+/** XP를 더하고 오늘 기록·연속 학습일을 갱신한다. 오늘 처음이면 true */
+function addXp(u, xp) {
+  const today = dayOf();
+  u.xp = (u.xp || 0) + xp;
+  u.xpByDay = u.xpByDay || {};
+  u.xpByDay[today] = (u.xpByDay[today] || 0) + xp;
+  const s = u.streak || { count: 0, last: null };
+  let up = false;
+  if (s.last !== today) {
+    s.count = s.last && dayDiff(s.last, today) === 1 ? s.count + 1 : 1;
+    s.last = today;
+    up = true;
+  }
+  u.streak = s;
+  return up;
+}
+const unitDone = (done, unit) => Array.from({ length: LESSONS_PER_UNIT }, (_, l) => done[`${unit}-${l}`]).every(Boolean);
+/** from 단원부터 to 단원 앞까지의 레슨을 끝낸 것으로 표시 (이미 한 횟수는 그대로) */
+function markUnits(prog, from, to) {
+  for (let un = from; un < to; un++) for (let l = 0; l < LESSONS_PER_UNIT; l++) prog.done[`${un}-${l}`] ||= 1;
 }
 
 // ───────── 비밀번호 ─────────
@@ -269,7 +294,7 @@ const routes = {
     if (db.users[id]) throw fail(400, '이미 있는 아이디예요.');
     if (String(pass || '').length < 4) throw fail(400, '비밀번호는 4자 이상이에요.');
     const name = String(nick || id).trim().slice(0, 12) || id;
-    const u = { id, nick: name, pass: await hashPass(String(pass)), created: Date.now(), xp: 0, xpByDay: {}, progress: {}, hearts: { n: MAX_HEARTS, t: Date.now() } };
+    const u = { id, nick: name, pass: await hashPass(String(pass)), created: Date.now(), xp: 0, xpByDay: {}, progress: {}, energy: { n: MAX_ENERGY, t: Date.now() } };
     db.users[id] = u;
     return { token: newSession(u), user: publicUser(u) };
   },
@@ -279,7 +304,7 @@ const routes = {
     limitTries('guest:' + (req.socket.remoteAddress || ''));
     let id;
     do { id = 'guest_' + randomBytes(3).toString('hex'); } while (db.users[id]);
-    const u = { id, nick: '체험', guest: true, pass: await hashPass(randomBytes(16).toString('hex')), created: Date.now(), xp: 0, xpByDay: {}, progress: {}, hearts: { n: MAX_HEARTS, t: Date.now() } };
+    const u = { id, nick: '체험', guest: true, pass: await hashPass(randomBytes(16).toString('hex')), created: Date.now(), xp: 0, xpByDay: {}, progress: {}, energy: { n: MAX_ENERGY, t: Date.now() } };
     db.users[id] = u;
     return { token: newSession(u), user: publicUser(u) };
   },
@@ -310,24 +335,42 @@ const routes = {
   },
   async 'GET /api/lesson'(req, u, url) {
     const courseId = url.searchParams.get('course');
-    const unit = Number(url.searchParams.get('unit'));
-    const lesson = Number(url.searchParams.get('lesson'));
+    const mode = url.searchParams.get('mode') || 'normal';
     const course = courseOf(courseId);
-    if (!course || !(unit >= 0 && unit < course.units.length) || !(lesson >= 0 && lesson < LESSONS_PER_UNIT)) throw fail(400, '없는 레슨이에요.');
-    if (hearts(u).n <= 0) throw fail(403, '하트가 없어요. 조금 쉬었다가 해요!');
-    // 다시 하는 레슨이면 다른 판을 준다 (0~2판 돌려 가며)
+    if (!course) throw fail(400, '없는 코스예요.');
     const done = (u.progress[courseId] || {}).done || {};
+    if (mode === 'practice') {
+      // 이미 끝낸 레슨 중 하나를 골라 연습 (하트 필요 없음)
+      const keys = Object.keys(done).filter((k) => done[k]);
+      if (!keys.length) throw fail(400, '먼저 레슨을 하나 끝내요!');
+      const key = keys[Math.floor(Math.random() * keys.length)];
+      const [unit, lesson] = key.split('-').map(Number);
+      const variant = Math.floor(Math.random() * 3);
+      return { ...(await getLesson(courseId, unit, lesson, variant)), unit, lesson };
+    }
+    const unit = Number(url.searchParams.get('unit'));
+    if (!(unit >= 0 && unit < course.units.length)) throw fail(400, '없는 레슨이에요.');
+    if (mode === 'jump') {
+      // 단원 건너뛰기 시험: 그 단원의 복습 레슨 (하트 필요 없음)
+      if (unitDone(done, unit)) throw fail(400, '이미 끝낸 단원이에요.');
+      return { ...(await getLesson(courseId, unit, LESSONS_PER_UNIT - 1, 0)), unit, lesson: LESSONS_PER_UNIT - 1 };
+    }
+    const lesson = Number(url.searchParams.get('lesson'));
+    if (!(lesson >= 0 && lesson < LESSONS_PER_UNIT)) throw fail(400, '없는 레슨이에요.');
+    if (energy(u).n < 1) throw fail(403, '에너지가 없어요. 조금 쉬거나 보석으로 채워요!');
+    // 다시 하는 레슨이면 다른 판을 준다 (0~2판 돌려 가며)
     const variant = (done[`${unit}-${lesson}`] || 0) % 3;
     return await getLesson(courseId, unit, lesson, variant);
   },
-  async 'POST /api/heart'(req, u) {
-    const h = hearts(u);
-    if (h.n > 0) {
-      if (h.n === MAX_HEARTS) u.hearts.t = Date.now();
-      u.hearts.n -= 1;
+  async 'POST /api/energy'(req, u) {
+    // 문제 하나 풀 때마다(맞든 틀리든) 1 쓴다
+    const e = energy(u);
+    if (e.n > 0) {
+      if (e.n === MAX_ENERGY) u.energy.t = Date.now();
+      u.energy.n -= 1;
     }
     save();
-    return { hearts: hearts(u) };
+    return { energy: energy(u) };
   },
   async 'POST /api/complete'(req, u) {
     const { course: courseId, unit, lesson, mistakes = 0 } = await body(req);
@@ -338,21 +381,80 @@ const routes = {
     const first = !prog.done[key];
     prog.done[key] = (prog.done[key] || 0) + 1;
     const xp = (first ? 10 : 5) + (mistakes === 0 ? 5 : 0);
-    const today = dayOf();
-    u.xp = (u.xp || 0) + xp;
-    u.xpByDay = u.xpByDay || {};
-    u.xpByDay[today] = (u.xpByDay[today] || 0) + xp;
-    const s = u.streak || { count: 0, last: null };
-    let streakUp = false;
-    if (s.last !== today) {
-      s.count = s.last && dayDiff(s.last, today) === 1 ? s.count + 1 : 1;
-      s.last = today;
-      streakUp = true;
-    }
-    u.streak = s;
+    const gems = (first ? 5 : 2) + (mistakes === 0 ? 3 : 0);
+    u.gems = (u.gems || 0) + gems;
+    const streakUp = addXp(u, xp);
     u.course = courseId;
     save();
-    return { xp, first, streakUp, user: publicUser(u) };
+    return { xp, gems, first, streakUp, user: publicUser(u) };
+  },
+  async 'POST /api/placement'(req, u) {
+    const { course: courseId, unit } = await body(req);
+    const course = courseOf(courseId);
+    if (!course) throw fail(400, '없는 코스예요.');
+    if (!(Number.isInteger(unit) && unit >= 0 && unit < course.units.length)) throw fail(400, '없는 단원이에요.');
+    const prog = (u.progress[courseId] ||= { done: {} });
+    if (Object.values(prog.done).some(Boolean)) throw fail(400, '이미 시작한 코스예요.');
+    markUnits(prog, 0, unit); // unit 앞 단원까지 끝낸 것으로 (XP 없음)
+    u.course = courseId;
+    save();
+    return { user: publicUser(u) };
+  },
+  async 'POST /api/jump'(req, u) {
+    const { course: courseId, unit, mistakes = 0 } = await body(req);
+    const course = courseOf(courseId);
+    if (!course || !(Number.isInteger(unit) && unit >= 0 && unit < course.units.length)) throw fail(400, '없는 단원이에요.');
+    const prog = (u.progress[courseId] ||= { done: {} });
+    const passed = Number(mistakes) <= 2;
+    let xp = 0;
+    let gems = 0;
+    let streakUp = false;
+    if (passed) {
+      markUnits(prog, 0, unit + 1); // 이 단원까지 모두 끝낸 것으로
+      xp = 10;
+      gems = 5;
+      u.gems = (u.gems || 0) + gems;
+      streakUp = addXp(u, xp);
+      u.course = courseId;
+      save();
+    }
+    return { passed, xp, gems, streakUp, user: publicUser(u) };
+  },
+  async 'POST /api/practice'(req, u) {
+    const { course: courseId } = await body(req);
+    if (!courseOf(courseId)) throw fail(400, '없는 코스예요.');
+    const e = energy(u);
+    const gained = Math.min(5, MAX_ENERGY - e.n);
+    u.energy.n += gained;
+    const xp = 5;
+    const streakUp = addXp(u, xp);
+    save();
+    return { xp, energy: gained, streakUp, user: publicUser(u) };
+  },
+  async 'POST /api/shop/energy'(req, u) {
+    const e = energy(u);
+    if (e.n >= MAX_ENERGY) throw fail(400, '에너지가 이미 가득해요.');
+    if ((u.gems || 0) < 40) throw fail(400, '보석이 모자라요.');
+    u.gems -= 40;
+    u.energy = { n: MAX_ENERGY, t: Date.now() };
+    save();
+    return { user: publicUser(u) };
+  },
+  async 'POST /api/chest'(req, u) {
+    // 단원마다 2번째 레슨 뒤에 있는 상자: 보석 10~30개, 한 번만
+    const { course: courseId, unit } = await body(req);
+    const course = courseOf(courseId);
+    if (!course || !(Number.isInteger(unit) && unit >= 0 && unit < course.units.length)) throw fail(400, '없는 상자예요.');
+    const done = (u.progress[courseId] || {}).done || {};
+    if (!done[`${unit}-0`] || !done[`${unit}-1`]) throw fail(400, '앞 레슨을 먼저 끝내요!');
+    u.chests = u.chests || {};
+    const opened = (u.chests[courseId] ||= []);
+    if (opened.includes(unit)) throw fail(400, '이미 연 상자예요.');
+    opened.push(unit);
+    const gems = 10 + Math.floor(Math.random() * 21);
+    u.gems = (u.gems || 0) + gems;
+    save();
+    return { gems, user: publicUser(u) };
   },
   async 'GET /api/leaderboard'() {
     const list = Object.values(db.users).map(publicUser).map((p) => ({ id: p.id, nick: p.nick, weekXp: p.weekXp, streak: p.streak.count }))
