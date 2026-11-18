@@ -37,37 +37,57 @@ function builtinLanguage(course, unitIdx, lessonIdx, seed) {
   if (!unit || !unit.vocab) return null;
   const rand = rng(`${course.id}-${unitIdx}-${lessonIdx}-${seed}`);
   const V = unit.vocab;
-  // 레슨마다 앞쪽에서 조금씩 밀어서 5단어씩 (마지막 레슨은 전체 복습)
+  // 레슨마다 중심 단어 5개: 레슨 번호에 맞는 앞쪽 단어를 먼저, 나머지는 무작위로 (마지막 레슨은 전체 복습)
   const start = (lessonIdx * 3) % V.length;
-  const focus = lessonIdx === LESSONS_PER_UNIT - 1 ? pick(V, 5, rand) : [0, 1, 2, 3, 4].map((k) => V[(start + k) % V.length]);
+  const core = lessonIdx === LESSONS_PER_UNIT - 1 ? [] : [0, 1, 2].map((k) => V[(start + k) % V.length]);
+  const focus = shuffle([...core, ...pick(V.filter((w) => !core.includes(w)), 5 - core.length, rand)], rand);
   const say = (w) => (w[2] ? `${w[0]} (${w[2]})` : w[0]);
   const targets = V.map((w) => w[0]);
   const meanings = V.map((w) => w[1]);
   const lang = course.lang;
-  const ex = [];
-
-  const [a, b, c, d, e] = focus;
-  ex.push(choice(`“${a[1]}”은(는) ${course.name}로?`, a[0], targets, rand, { speakAnswer: true, lang }));
-  ex.push(choice(`“${say(b)}”은(는) 무슨 뜻?`, b[1], meanings, rand, { speak: b[0], lang }));
-  ex.push({ ...choice('들리는 말을 고르세요', c[0], targets, rand), type: 'listen', speak: c[0], lang });
-  ex.push({ type: 'match', pairs: pick(focus, 4, rand).map((w) => [w[0], w[1]]), lang });
-
   const S = unit.sentences || [];
   const allTokens = S.flatMap((s) => s.t);
-  for (const s of pick(S, 2, rand)) {
+  const koTokens = (s) => s.ko.replace(/[.,!?]/g, '').split(' ').filter(Boolean);
+
+  // 같은 단어는 한 레슨에서 한 가지 문제로만 나온다. 문제 종류는 단어마다 무작위.
+  const wordMakers = [
+    (w) => choice(`“${w[1]}”은(는) ${course.name}로?`, w[0], targets, rand, { speakAnswer: true, lang }),
+    (w) => choice(`“${say(w)}”은(는) 무슨 뜻?`, w[1], meanings, rand, { speak: w[0], lang }),
+    (w) => ({ ...choice('들리는 말을 고르세요', w[0], targets, rand), type: 'listen', speak: w[0], lang }),
+    (w) => (w[0].length <= 14
+      ? { type: 'type', prompt: `“${w[1]}”을(를) ${course.name}로 써 보세요`, answers: [w[0], ...(w[2] ? [w[2]] : [])], lang, speak: w[0] }
+      : null)
+  ];
+  const ex = [];
+  focus.forEach((w, i) => {
+    const order = shuffle([0, 1, 2, 3], rand);
+    // 쓰기 문제는 한 레슨에 하나만
+    const k = order.find((j) => j !== 3 || !ex.some((e) => e.type === 'type'));
+    const e = wordMakers[k](w) || wordMakers[i % 3](w);
+    ex.push(e);
+  });
+  ex.push({ type: 'match', pairs: pick(V.filter((w) => !focus.includes(w)).length >= 4 ? V : focus, 4, rand).map((w) => [w[0], w[1]]), lang });
+
+  // 문장: 만들기(배우는 말로) 2개 + 거꾸로(한국어로) 또는 뜻 고르기 1개
+  const sents = pick(S, 3, rand);
+  sents.slice(0, 2).forEach((s) => {
     const extra = pick(allTokens.filter((t) => !s.t.includes(t)), 2, rand);
     ex.push({ type: 'build', prompt: '이 문장을 만들어 보세요', source: s.ko, answer: s.t, bank: shuffle([...s.t, ...extra], rand), lang, speak: s.text });
+  });
+  const s3 = sents[2];
+  if (s3) {
+    const ko = koTokens(s3);
+    if (rand() < 0.5 && ko.length >= 2) {
+      const extra = pick(S.flatMap(koTokens).filter((t) => !ko.includes(t)), 2, rand);
+      ex.push({ type: 'build', prompt: '한국어로 옮겨 보세요', source: s3.text, answer: ko, bank: shuffle([...ko, ...extra], rand), lang: 'ko-KR', speak: s3.text, speakLang: lang });
+    } else {
+      ex.push(choice(`“${s3.text}”은(는) 무슨 뜻?`, s3.ko, S.map((x) => x.ko), rand, { speak: s3.text, lang }));
+    }
   }
-  ex.push(choice(`“${d[1]}”은(는) ${course.name}로?`, d[0], targets, rand, { speakAnswer: true, lang }));
-  ex.push({ ...choice('들리는 말을 고르세요', e[0], targets, rand), type: 'listen', speak: e[0], lang });
-  // 쓰기: 짧은 말만 (일본어·중국어는 글자 입력이 어려워서 읽는 법으로도 받는다)
-  const short = focus.find((w) => w[0].length <= 12) || a;
-  ex.push({ type: 'type', prompt: `“${short[1]}”을(를) ${course.name}로 써 보세요`, answers: [short[0], ...(short[2] ? [short[2]] : [])], lang, speak: short[0] });
-  if (S.length) {
-    const s = S[Math.floor(rand() * S.length)];
-    ex.push(choice(`“${s.text}”은(는) 무슨 뜻?`, s.ko, S.map((x) => x.ko), rand, { speak: s.text, lang }));
-  }
-  return { exercises: ex.filter(Boolean), source: 'builtin' };
+  // 첫 문제는 쉬운 고르기로, 나머지는 섞는다
+  const first = ex.findIndex((e) => e.type === 'choice');
+  const head = first >= 0 ? ex.splice(first, 1) : [];
+  return { exercises: [...head, ...shuffle(ex, rand)].filter(Boolean), source: 'builtin' };
 }
 
 // ───────── 체스 (내장) ─────────

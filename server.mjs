@@ -254,7 +254,8 @@ async function getLesson(courseId, unit, lesson, variant) {
   const file = join(DATA, 'lessons', `${courseId}-${unit}-${lesson}-${variant}.json`);
   if (existsSync(file)) return JSON.parse(await readFile(file, 'utf8'));
   // 내장 자료가 있으면 그걸 쓴다 (체스는 항상 내장)
-  const built = builtinLesson(courseId, unit, lesson, variant);
+  // 내장 레슨은 할 때마다 다르게 섞는다 (같은 문제가 자꾸 나오던 문제)
+  const built = builtinLesson(courseId, unit, lesson, Math.floor(Math.random() * 1e9));
   if (built && (course.kind === 'chess' || variant === 0 || !hasAnyKey())) return built;
   if (making.has(file)) return making.get(file);
   const job = (async () => {
@@ -562,8 +563,23 @@ const routes = {
 };
 const PUBLIC_ROUTES = new Set(['POST /api/signup', 'POST /api/login', 'POST /api/guest', 'GET /api/status']);
 
+// GitHub 사이트(화면)에서 이 컴퓨터 서버를 부를 수 있게 허락할 주소들
+const allowedOrigin = (origin) => {
+  const list = config.allowOrigins || ['https://sherlock12369-collab.github.io'];
+  return origin && (list.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) ? origin : null;
+};
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  const origin = allowedOrigin(req.headers.origin);
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Max-Age', '600');
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(origin ? 204 : 403); res.end(); return; }
   try {
     if (url.pathname.startsWith('/api/')) {
       const name = `${req.method} ${url.pathname}`;

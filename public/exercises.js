@@ -1,6 +1,7 @@
 // 슬터디 — 문제 화면 6종류 (고르기, 듣기, 문장 만들기, 짝 맞추기, 쓰기, 체스판)
 // app.js가 mountExercise(ex, host, ctx)로 부르고, 돌려받은 controller로 확인·잠금을 한다.
 import { parseFEN, legalMoves, makeMove, meetsGoal, solutions, sqName, GLYPH, PIECE_KO } from './chess.js';
+import { sfx } from './sound.js';
 
 export const TYPE_TITLE = {
   choice: '알맞은 뜻을 고르세요', listen: '들리는 말을 고르세요', build: '문장을 만들어 보세요',
@@ -9,6 +10,13 @@ export const TYPE_TITLE = {
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const cjk = (lang) => /^(ja|zh)/.test(lang || '');
+const hangul = (t) => /[가-힣]/.test(String(t || ''));
+/** 배우는 말이면(한글이 아니면) 읽어 준다 */
+const speakTarget = (ctx, text, lang) => { if (text && !hangul(text)) ctx.speak(text, lang); };
+/** 확인 뒤 읽어 줄 정답 (한글이면 없음) */
+const after = (text, lang) => (text && !hangul(text) ? { speakAfter: { text, lang } } : {});
+/** prompt 안의 “따옴표” 말을 꺼낸다 */
+const quoted = (t) => { const m = String(t || '').match(/[“"‘']([^”"’']+)[”"’']/); return m ? m[1] : ''; };
 const shuffle = (arr) => {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
@@ -74,14 +82,10 @@ function mountChoice(ex, host, ctx) {
     big.onclick = () => ctx.speak(ex.speak, ex.lang);
     slow.onclick = () => ctx.speak(ex.speak, ex.lang, 0.6);
     host.appendChild(row);
-  } else if (ex.speak) {
-    const b = document.createElement('button');
-    b.className = 'speak-btn';
-    b.type = 'button';
-    b.title = '듣기';
-    b.innerHTML = SPEAKER;
-    b.onclick = () => ctx.speak(ex.speak, ex.lang);
-    host.appendChild(b);
+  } else {
+    // 모든 문제에 슬이 나온다: 말풍선에 물어보는 말 (듣기 버튼은 말풍선 안)
+    const word = ex.speak || quoted(ex.prompt) || ex.prompt || '';
+    say(host, ctx, word, ex.speak || null, ex.lang);
   }
   if (ex.speak) setTimeout(() => ctx.speak(ex.speak, ex.lang), 250);
 
@@ -103,7 +107,9 @@ function mountChoice(ex, host, ctx) {
     if (buttons[i].disabled) return;
     selected = i;
     buttons.forEach((b, k) => b.classList.toggle('sel', k === i));
-    ctx.sfx && ctx.sfx('tap');
+    sfx('select');
+    // 보기가 배우는 말이면 누를 때 읽어 준다 (듣기 문제는 정답이 드러나므로 읽지 않음)
+    if (!listen && (ex.speakAnswer || !hangul(ex.options[i]))) speakTarget(ctx, ex.options[i], ex.lang);
     ctx.setReady(true);
   }
   onKeys((e) => { const n = Number(e.key); if (n >= 1 && n <= buttons.length) select(n - 1); });
@@ -112,8 +118,10 @@ function mountChoice(ex, host, ctx) {
     auto: false,
     check() {
       const correct = selected === ex.answer;
-      if (ex.speakAnswer) ctx.speak(ex.options[ex.answer], ex.lang);
-      return { correct, solution: correct ? '' : ex.options[ex.answer] };
+      const ans = ex.options[ex.answer];
+      // 정답이 배우는 말이면 그걸, 아니면 문제의 소리 글(ex.speak)을 읽어 준다
+      const sayIt = !hangul(ans) ? ans : listen ? ex.speak : '';
+      return { correct, solution: correct ? '' : ans, ...(correct ? after(sayIt, ex.lang) : {}) };
     },
     lock() { lockAll(host); }
   };
@@ -137,7 +145,8 @@ function mountBuild(ex, host, ctx) {
     b.onclick = () => {
       if (b.classList.contains('used')) return;
       chosen.push(i);
-      ctx.speak(t, ex.lang);
+      sfx('select');
+      speakTarget(ctx, t, ex.lang);
       draw();
     };
     bank.appendChild(b);
@@ -150,7 +159,7 @@ function mountBuild(ex, host, ctx) {
       b.type = 'button';
       b.className = 'tok';
       b.textContent = ex.bank[i];
-      b.onclick = () => { chosen.splice(pos, 1); ctx.sfx && ctx.sfx('tap'); draw(); };
+      b.onclick = () => { chosen.splice(pos, 1); sfx('tap'); draw(); };
       line.appendChild(b);
     });
     bankBtns.forEach((b, i) => b.classList.toggle('used', chosen.includes(i)));
@@ -162,7 +171,8 @@ function mountBuild(ex, host, ctx) {
     auto: false,
     check() {
       const correct = _sameBuild(chosen.map((i) => ex.bank[i]), ex.answer, ex.lang);
-      return { correct, solution: correct ? '' : ex.answer.join(joiner) };
+      const full = ex.speak || ex.answer.join(joiner);
+      return { correct, solution: correct ? '' : ex.answer.join(joiner), ...(correct ? after(full, ex.lang) : {}) };
     },
     lock() { lockAll(host); }
   };
@@ -194,12 +204,12 @@ function mountMatch(ex, host, ctx) {
   let finished = false;
   function tap(it) {
     if (finished || it.el.classList.contains('gone')) return;
-    if (it.side === 0) ctx.speak(it.text, ex.lang);
+    speakTarget(ctx, it.text, ex.lang);
     if (!picked || picked.side === it.side) {
       if (picked) picked.el.classList.remove('sel');
       picked = it;
       it.el.classList.add('sel');
-      ctx.sfx && ctx.sfx('tap');
+      sfx('select');
       return;
     }
     const a = picked;
@@ -208,7 +218,7 @@ function mountMatch(ex, host, ctx) {
     if (a.id === it.id) {
       a.el.classList.add('gone');
       it.el.classList.add('gone');
-      ctx.sfx && ctx.sfx('tap');
+      sfx('tap');
       if (--left_ === 0) {
         finished = true;
         setTimeout(() => ctx.finish({ correct: true, solution: '' }), 300);
@@ -251,8 +261,7 @@ function mountType(ex, host, ctx) {
     check() {
       const v = _normalize(ta.value, ex.lang);
       const correct = (ex.answers || []).some((a) => _normalize(a, ex.lang) === v);
-      if (correct && ex.speak) ctx.speak(ex.speak, ex.lang);
-      return { correct, solution: correct ? '' : ex.answers[0] };
+      return { correct, solution: correct ? '' : ex.answers[0], ...(correct ? after(ex.speak || ex.answers[0], ex.lang) : {}) };
     },
     lock() { lockAll(host); }
   };
@@ -291,13 +300,13 @@ function mountChess(ex, host, ctx) {
       const p = pos.board[i];
       let html = '';
       if (targets.some((m) => m.to === i)) html += start.board[i] ? '<span class="ring"></span>' : '<span class="dot"></span>';
-      if (p) html += `<span class="pc ${p === p.toUpperCase() ? 'w' : 'b'}">${GLYPH[p]}</span>`;
+      // 흰·검 모두 꽉 찬 모양(♚♛…)을 쓰고 색은 CSS로 칠한다 (흰 기물이 테두리만 보이던 문제)
+      if (p) html += `<span class="pc ${p === p.toUpperCase() ? 'w' : 'b'}">${GLYPH[p.toLowerCase()]}</span>`;
       const col = k % 8;
       const row = Math.floor(k / 8);
-      const coord = [];
-      if (col === 0) coord.push(String(8 - r));
-      if (row === 7) coord.push(sqName(i)[0]);
-      if (coord.length) html += `<span class="coord">${coord.join('')}</span>`;
+      // 숫자는 왼쪽 위, 글자는 오른쪽 아래 (겹치지 않게)
+      if (col === 0) html += `<span class="coord rank">${sqName(i)[1]}</span>`;
+      if (row === 7) html += `<span class="coord file">${sqName(i)[0]}</span>`;
       b.innerHTML = html;
       b.onclick = () => tap(i);
       board.appendChild(b);
@@ -312,7 +321,7 @@ function mountChess(ex, host, ctx) {
       move = null;
       selected = i;
       ctx.setReady(false);
-      ctx.sfx && ctx.sfx('tap');
+      sfx('tap');
       draw();
       return;
     }
@@ -322,7 +331,7 @@ function mountChess(ex, host, ctx) {
     move = m;
     pos = makeMove(start, m);
     selected = null;
-    ctx.sfx && ctx.sfx('tap');
+    sfx('tap');
     ctx.setReady(true);
     draw();
   }
